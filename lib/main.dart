@@ -1,8 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -11,285 +8,20 @@ import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'core/themes.dart';
+import 'core/sound_generator.dart';
+import 'models/trip_record.dart';
+import 'models/speed_camera.dart';
+import 'services/trip_storage.dart';
+import 'services/voice_assistant.dart';
+import 'ui/widgets/gauge_painter.dart';
+import 'ui/widgets/telemetry_graph.dart';
+import 'ui/widgets/tree_lights.dart';
+import 'ui/widgets/map_canvas.dart';
+import 'ui/widgets/dashcam_overlay.dart';
+
 void main() {
   runApp(const SpeedometerApp());
-}
-
-// -------------------------------------------------------------
-// THEME & SOUND CONFIGURATION
-// -------------------------------------------------------------
-class AppThemeOption {
-  final String name;
-  final Color primary;
-  final Color secondary;
-  final Color background;
-  final Color cardBackground;
-
-  const AppThemeOption({
-    required this.name,
-    required this.primary,
-    required this.secondary,
-    required this.background,
-    required this.cardBackground,
-  });
-}
-
-const List<AppThemeOption> kAvailableThemes = [
-  AppThemeOption(
-    name: 'Cyberpunk Neon',
-    primary: Color(0xFF00F0FF),
-    secondary: Color(0xFFFF3B30),
-    background: Color(0xFF070B14),
-    cardBackground: Color(0xFF0D1527),
-  ),
-  AppThemeOption(
-    name: 'Racing Red',
-    primary: Color(0xFFFF2A6D),
-    secondary: Color(0xFFFFD600),
-    background: Color(0xFF0B0609),
-    cardBackground: Color(0xFF1B0B14),
-  ),
-  AppThemeOption(
-    name: 'Electric Lime',
-    primary: Color(0xFF00FF66),
-    secondary: Color(0xFFFF3B30),
-    background: Color(0xFF050E08),
-    cardBackground: Color(0xFF091C10),
-  ),
-  AppThemeOption(
-    name: 'Sunset Gold',
-    primary: Color(0xFFFFB800),
-    secondary: Color(0xFFFF3B30),
-    background: Color(0xFF0E0B05),
-    cardBackground: Color(0xFF1F170A),
-  ),
-];
-
-enum SoundToneStyle {
-  cyberpunk,
-  supercar,
-  scifi,
-  sportBell,
-}
-
-const Map<SoundToneStyle, String> kSoundToneLabels = {
-  SoundToneStyle.cyberpunk: 'Cyberpunk Beep (950Hz)',
-  SoundToneStyle.supercar: 'Supercar Chime (Dual Tone)',
-  SoundToneStyle.scifi: 'Sci-Fi Arcade (Arpeggio)',
-  SoundToneStyle.sportBell: 'Sport Bell (A5 Harmonic)',
-};
-
-// -------------------------------------------------------------
-// SPEED CAMERA POI MODEL
-// -------------------------------------------------------------
-class SpeedCameraZone {
-  final String id;
-  final String name;
-  final double latitude;
-  final double longitude;
-  final double speedLimit;
-
-  SpeedCameraZone({
-    required this.id,
-    required this.name,
-    required this.latitude,
-    required this.longitude,
-    required this.speedLimit,
-  });
-}
-
-// -------------------------------------------------------------
-// TRIP RECORD MODEL & LOCAL PERSISTENCE
-// -------------------------------------------------------------
-class TripRecord {
-  final String id;
-  final String dateTimeFormatted;
-  final double distanceMeters;
-  final int durationSeconds;
-  final double maxSpeed;
-  final double avgSpeed;
-  final String unit;
-  final double? bestZeroHundredSec;
-  final double? peakG;
-  final double? fuelLiters;
-  final double? tripCost;
-
-  TripRecord({
-    required this.id,
-    required this.dateTimeFormatted,
-    required this.distanceMeters,
-    required this.durationSeconds,
-    required this.maxSpeed,
-    required this.avgSpeed,
-    required this.unit,
-    this.bestZeroHundredSec,
-    this.peakG,
-    this.fuelLiters,
-    this.tripCost,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'dateTimeFormatted': dateTimeFormatted,
-        'distanceMeters': distanceMeters,
-        'durationSeconds': durationSeconds,
-        'maxSpeed': maxSpeed,
-        'avgSpeed': avgSpeed,
-        'unit': unit,
-        'bestZeroHundredSec': bestZeroHundredSec,
-        'peakG': peakG,
-        'fuelLiters': fuelLiters,
-        'tripCost': tripCost,
-      };
-
-  factory TripRecord.fromJson(Map<String, dynamic> json) => TripRecord(
-        id: json['id'] as String,
-        dateTimeFormatted: json['dateTimeFormatted'] as String,
-        distanceMeters: (json['distanceMeters'] as num).toDouble(),
-        durationSeconds: (json['durationSeconds'] as num).toInt(),
-        maxSpeed: (json['maxSpeed'] as num).toDouble(),
-        avgSpeed: (json['avgSpeed'] as num).toDouble(),
-        unit: json['unit'] as String? ?? 'km/h',
-        bestZeroHundredSec: json['bestZeroHundredSec'] != null
-            ? (json['bestZeroHundredSec'] as num).toDouble()
-            : null,
-        peakG: json['peakG'] != null ? (json['peakG'] as num).toDouble() : null,
-        fuelLiters: json['fuelLiters'] != null
-            ? (json['fuelLiters'] as num).toDouble()
-            : null,
-        tripCost: json['tripCost'] != null
-            ? (json['tripCost'] as num).toDouble()
-            : null,
-      );
-}
-
-class TripStorageService {
-  static const String _fileName = 'trip_history.json';
-
-  static Future<File> _getFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/$_fileName');
-  }
-
-  static Future<List<TripRecord>> loadTrips() async {
-    try {
-      final file = await _getFile();
-      if (!await file.exists()) return [];
-      final content = await file.readAsString();
-      final List<dynamic> list = jsonDecode(content) as List<dynamic>;
-      return list.map((e) => TripRecord.fromJson(e as Map<String, dynamic>)).toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  static Future<void> saveTrip(TripRecord trip) async {
-    try {
-      final trips = await loadTrips();
-      trips.insert(0, trip);
-      final file = await _getFile();
-      final jsonStr = jsonEncode(trips.map((e) => e.toJson()).toList());
-      await file.writeAsString(jsonStr);
-    } catch (_) {}
-  }
-
-  static Future<void> deleteTrip(String id) async {
-    try {
-      final trips = await loadTrips();
-      trips.removeWhere((t) => t.id == id);
-      final file = await _getFile();
-      final jsonStr = jsonEncode(trips.map((e) => e.toJson()).toList());
-      await file.writeAsString(jsonStr);
-    } catch (_) {}
-  }
-
-  static Future<void> clearAll() async {
-    try {
-      final file = await _getFile();
-      if (await file.exists()) {
-        await file.delete();
-      }
-    } catch (_) {}
-  }
-}
-
-// -------------------------------------------------------------
-// SOUND SYNTHESIZER (PCM WAV FOR MULTIPLE STYLES)
-// -------------------------------------------------------------
-Uint8List _generateSoundTone(SoundToneStyle style) {
-  const int sampleRate = 44100;
-  final double duration = style == SoundToneStyle.supercar ? 0.20 : 0.14;
-  final int numSamples = (sampleRate * duration).toInt();
-  final int dataSize = numSamples * 2;
-  final int fileSize = 36 + dataSize;
-  final buffer = ByteData(44 + dataSize);
-
-  // RIFF header
-  buffer.setUint8(0, 0x52); // R
-  buffer.setUint8(1, 0x49); // I
-  buffer.setUint8(2, 0x46); // F
-  buffer.setUint8(3, 0x46); // F
-  buffer.setUint32(4, fileSize, Endian.little);
-  buffer.setUint8(8, 0x57);  // W
-  buffer.setUint8(9, 0x41);  // A
-  buffer.setUint8(10, 0x56); // V
-  buffer.setUint8(11, 0x45); // E
-
-  // fmt chunk
-  buffer.setUint8(12, 0x66); // f
-  buffer.setUint8(13, 0x6D); // m
-  buffer.setUint8(14, 0x74); // t
-  buffer.setUint8(15, 0x20); // space
-  buffer.setUint32(16, 16, Endian.little);
-  buffer.setUint16(20, 1, Endian.little); // PCM
-  buffer.setUint16(22, 1, Endian.little); // mono
-  buffer.setUint32(24, sampleRate, Endian.little);
-  buffer.setUint32(28, sampleRate * 2, Endian.little);
-  buffer.setUint16(32, 2, Endian.little);
-  buffer.setUint16(34, 16, Endian.little);
-
-  // data chunk
-  buffer.setUint8(36, 0x64); // d
-  buffer.setUint8(37, 0x61); // a
-  buffer.setUint8(38, 0x74); // t
-  buffer.setUint8(39, 0x61); // a
-  buffer.setUint32(40, dataSize, Endian.little);
-
-  int offset = 44;
-  for (int i = 0; i < numSamples; i++) {
-    double t = i / sampleRate;
-    double progress = i / numSamples;
-    double envelope = 1.0;
-    if (progress < 0.12) {
-      envelope = progress / 0.12;
-    } else if (progress > 0.8) {
-      envelope = (1.0 - progress) / 0.2;
-    }
-
-    double sampleVal = 0.0;
-    switch (style) {
-      case SoundToneStyle.cyberpunk:
-        sampleVal = sin(2 * pi * 950 * t);
-        break;
-      case SoundToneStyle.supercar:
-        sampleVal = 0.55 * sin(2 * pi * 1150 * t) + 0.45 * sin(2 * pi * 780 * t);
-        break;
-      case SoundToneStyle.scifi:
-        double freq = 650 + 650 * progress;
-        sampleVal = sin(2 * pi * freq * t);
-        break;
-      case SoundToneStyle.sportBell:
-        double decay = exp(-3.5 * progress);
-        sampleVal = sin(2 * pi * 880 * t) * decay;
-        break;
-    }
-
-    int pcm = (sampleVal * 28000 * envelope).clamp(-32768, 32767).toInt();
-    buffer.setInt16(offset, pcm, Endian.little);
-    offset += 2;
-  }
-
-  return buffer.buffer.asUint8List();
 }
 
 class SpeedometerApp extends StatefulWidget {
@@ -355,41 +87,41 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
   static const MethodChannel _pipChannel =
       MethodChannel('com.example.gps_speedometer/pip');
 
-  // RepaintBoundary Key for Telemetry Card Sharing
   final GlobalKey _shareCardKey = GlobalKey();
 
   // State Metrics
   double _rawSpeedMs = 0.0;
-  double _currentSpeed = 0.0; // In selected unit
+  double _currentSpeed = 0.0;
   double _maxSpeed = 0.0;
   double _avgSpeed = 0.0;
   double _totalDistanceMeters = 0.0;
   int _elapsedSeconds = 0;
 
-  // Additional GPS Sensors
+  // GPS Sensors
   double _heading = 0.0;
   double _altitude = 0.0;
   double _accuracy = 0.0;
 
-  // UX & Tabs
+  // UI Modes & Tabs (0: Gauge, 1: Digital, 2: HUD, 3: Drag, 4: Map, 5: Dashcam)
+  int _activeTab = 0;
   bool _isTracking = false;
   bool _isHudFlipped = false;
   bool _isHudFullscreen = false;
-  int _activeTab = 0; // 0: Gauge, 1: Digital, 2: HUD, 3: Performance (Drag)
+  bool _isSplitCockpit = false;
 
   // Settings
-  String _unit = 'km/h'; // 'km/h', 'mph', 'knots'
+  String _unit = 'km/h';
   double _speedLimit = 80.0;
   double _maxGaugeScale = 260.0;
   bool _audioAlertEnabled = true;
   bool _vibrationAlertEnabled = true;
   SoundToneStyle _soundStyle = SoundToneStyle.cyberpunk;
 
-  // Fuel Economy & Cost Settings
-  double _fuelConsumptionKmPerL = 14.5; // km/L
-  double _fuelPricePerLiter = 38.50; // THB or currency unit
+  // Fuel Economy
+  double _fuelConsumptionKmPerL = 14.5;
+  double _fuelPricePerLiter = 38.50;
 
-  // Speed Camera Alert Settings
+  // Speed Cameras
   bool _speedCameraAlertEnabled = true;
   final List<SpeedCameraZone> _speedCameras = [
     SpeedCameraZone(id: 'c1', name: 'Expressway Camera 1', latitude: 13.7563, longitude: 100.5018, speedLimit: 90),
@@ -398,17 +130,16 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
   SpeedCameraZone? _nearbySpeedCamera;
   double? _cameraDistanceMeters;
 
-  // Streams & Timers
+  // Location & Breadcrumbs
   StreamSubscription<Position>? _positionStream;
   Timer? _tripTimer;
   Timer? _alertPulseTimer;
   final List<double> _speedRecords = [];
   final List<double> _recentSpeedPoints = [];
+  final List<Position> _breadcrumbs = [];
   Position? _lastPosition;
 
-  // -----------------------------------------------------------
-  // PERFORMANCE / DRAG TEST STATE
-  // -----------------------------------------------------------
+  // Drag Racing Performance
   DragRunState _dragState = DragRunState.idle;
   DateTime? _dragStartTime;
   Timer? _dragWatchTimer;
@@ -425,18 +156,18 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
   DateTime _lastGTime = DateTime.now();
   int _treeLightStage = 0;
 
-  // Audio Player & Audio Buffers
+  // Audio & Voice Services
   late final AudioPlayer _audioPlayer;
+  late final VoiceAssistantService _voiceAssistant;
   late Uint8List _currentToneBytes;
-  late final Uint8List _highBeepBytes;
   bool _isAlertPulsing = false;
 
   @override
   void initState() {
     super.initState();
-    _currentToneBytes = _generateSoundTone(_soundStyle);
-    _highBeepBytes = _generateSoundTone(SoundToneStyle.supercar);
+    _currentToneBytes = SoundGenerator.generateTone(_soundStyle);
     _audioPlayer = AudioPlayer();
+    _voiceAssistant = VoiceAssistantService();
     _checkLocationPermission();
   }
 
@@ -448,26 +179,23 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     _dragWatchTimer?.cancel();
     _alertPulseTimer?.cancel();
     _audioPlayer.dispose();
+    _voiceAssistant.dispose();
     super.dispose();
   }
 
-  // Native Android Wakelock
   Future<void> _setScreenAwake(bool awake) async {
     try {
       await _wakelockChannel.invokeMethod(awake ? 'enable' : 'disable');
     } catch (_) {}
   }
 
-  // Native Android Picture-in-Picture (Floating Overlay)
   Future<void> _enterPictureInPicture() async {
     try {
       await _pipChannel.invokeMethod('enterPip');
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Floating PiP mode is supported on Android 8.0+ devices.'),
-          ),
+          const SnackBar(content: Text('PiP mode is supported on Android 8.0+ devices.')),
         );
       }
     }
@@ -510,9 +238,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     return distanceKm / _fuelConsumptionKmPerL;
   }
 
-  double get _tripFuelCost {
-    return _consumedFuelLiters * _fuelPricePerLiter;
-  }
+  double get _tripFuelCost => _consumedFuelLiters * _fuelPricePerLiter;
 
   Future<void> _checkLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -552,7 +278,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
         _lastGTime = now;
       }
 
-      // Speed Camera Proximity Check
       _checkSpeedCameraProximity(position);
 
       setState(() {
@@ -561,9 +286,18 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
         _altitude = position.altitude;
         _accuracy = position.accuracy;
 
+        // Keep rolling speed graph
         _recentSpeedPoints.add(speedInUnit);
         if (_recentSpeedPoints.length > 35) {
           _recentSpeedPoints.removeAt(0);
+        }
+
+        // Add GPS Breadcrumb point
+        if (speedInUnit > 0.5) {
+          _breadcrumbs.add(position);
+          if (_breadcrumbs.length > 250) {
+            _breadcrumbs.removeAt(0);
+          }
         }
 
         if (_isTracking) {
@@ -612,6 +346,10 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       }
     }
 
+    if (closest != null && (_nearbySpeedCamera == null || minDistance < 500)) {
+      _voiceAssistant.speakPrompt(VoicePromptType.speedCamera, extraInfo: '${closest.speedLimit.toInt()} $_unit');
+    }
+
     _nearbySpeedCamera = closest;
     _cameraDistanceMeters = closest != null ? minDistance : null;
   }
@@ -652,7 +390,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       _treeLightStage = 1;
     });
     _syncWakelockState();
-    HapticFeedback.mediumImpact();
+    _voiceAssistant.speakPrompt(VoicePromptType.dragReady);
   }
 
   void _resetPerformanceTest() {
@@ -687,10 +425,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       _dragStartTime = DateTime.now();
       _dragLastPosition = position;
       _treeLightStage = 3;
-      HapticFeedback.heavyImpact();
-      if (_audioAlertEnabled) {
-        _audioPlayer.play(BytesSource(_currentToneBytes), mode: PlayerMode.lowLatency);
-      }
+      _voiceAssistant.speakPrompt(VoicePromptType.dragGo);
 
       _dragWatchTimer?.cancel();
       _dragWatchTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
@@ -726,10 +461,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
 
       if (_time0To100 == null && speedKmh >= 100.0) {
         _time0To100 = elapsed;
-        HapticFeedback.heavyImpact();
-        if (_audioAlertEnabled) {
-          _audioPlayer.play(BytesSource(_highBeepBytes), mode: PlayerMode.lowLatency);
-        }
+        _voiceAssistant.speakPrompt(VoicePromptType.dragSuccess, extraInfo: '${elapsed.toStringAsFixed(2)}s');
       }
 
       if (_timeQuarterMile == null && _dragDistanceMeters >= 402.3) {
@@ -751,6 +483,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     if (isOverLimit) {
       if (!_isAlertPulsing) {
         _startAlertPulsing();
+        _voiceAssistant.speakPrompt(VoicePromptType.overspeed);
       }
     } else {
       if (_isAlertPulsing) {
@@ -838,6 +571,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       );
 
       await TripStorageService.saveTrip(record);
+      _voiceAssistant.speakPrompt(VoicePromptType.tripFinished, extraInfo: '${(_totalDistanceMeters / 1000).toStringAsFixed(1)} km');
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -849,7 +584,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                 const Text('Trip saved to History Logbook', style: TextStyle(color: Colors.white, fontSize: 13)),
               ],
             ),
-            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -893,7 +627,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     final theme = widget.currentTheme;
     bool isOverLimit = _currentSpeed > _speedLimit && _isTracking;
 
-    // Fullscreen HUD Mode for Windshield Projection
     if (_isHudFullscreen && _activeTab == 2) {
       return GestureDetector(
         onTap: () => setState(() => _isHudFullscreen = false),
@@ -929,6 +662,11 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
         ),
         actions: [
           IconButton(
+            icon: Icon(_isSplitCockpit ? Icons.view_agenda : Icons.view_agenda_outlined, color: theme.primary),
+            tooltip: 'Toggle Split Cockpit',
+            onPressed: () => setState(() => _isSplitCockpit = !_isSplitCockpit),
+          ),
+          IconButton(
             icon: Icon(Icons.picture_in_picture_alt_outlined, color: theme.primary),
             tooltip: 'Floating PiP Overlay',
             onPressed: _enterPictureInPicture,
@@ -948,16 +686,21 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Top Tabs Bar (Gauge, Digital, HUD, Drag)
+            // Top Navigation Tabs (6 Views)
             Container(
               color: theme.cardBackground.withOpacity(0.6),
-              child: Row(
-                children: [
-                  _buildTabItem(0, 'Gauge', Icons.speed, theme),
-                  _buildTabItem(1, 'Digital', Icons.pin, theme),
-                  _buildTabItem(2, 'HUD', Icons.flip, theme),
-                  _buildTabItem(3, 'Drag', Icons.sports_score_rounded, theme),
-                ],
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildTabItem(0, 'Gauge', Icons.speed, theme),
+                    _buildTabItem(1, 'Digital', Icons.pin, theme),
+                    _buildTabItem(2, 'HUD', Icons.flip, theme),
+                    _buildTabItem(3, 'Drag', Icons.sports_score_rounded, theme),
+                    _buildTabItem(4, 'Map & Trail', Icons.map_outlined, theme),
+                    _buildTabItem(5, 'Dashcam', Icons.videocam_outlined, theme),
+                  ],
+                ),
               ),
             ),
 
@@ -995,7 +738,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                 ),
               ),
 
-            // Speed Camera Radar Alert Banner
+            // Speed Camera Radar Banner
             if (_nearbySpeedCamera != null && _cameraDistanceMeters != null)
               Container(
                 width: double.infinity,
@@ -1016,8 +759,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
 
             // Telemetry Compass / GPS / G-Force Bar
             Container(
-              margin: const EdgeInsets.fromLTRB(16, 6, 16, 4),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              margin: const EdgeInsets.fromLTRB(16, 5, 16, 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
               decoration: BoxDecoration(
                 color: theme.cardBackground,
                 borderRadius: BorderRadius.circular(10),
@@ -1054,21 +797,35 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
             ),
 
-            // Main Active View (Gauge, Digital, HUD, or Drag Performance)
+            // Main Active View or Cockpit Split Screen
             Expanded(
-              child: Center(
-                child: _activeTab == 0
-                    ? _buildGaugeView(isOverLimit, theme)
-                    : _activeTab == 1
-                        ? _buildDigitalView(isOverLimit, theme)
-                        : _activeTab == 2
-                            ? _buildHudView(isOverLimit, theme)
-                            : _buildPerformanceDragView(theme),
-              ),
+              child: _isSplitCockpit
+                  ? Column(
+                      children: [
+                        Expanded(
+                          flex: 1,
+                          child: InteractiveMapCanvas(
+                            currentPosition: _lastPosition,
+                            heading: _heading,
+                            breadcrumbs: _breadcrumbs,
+                            speedCameras: _speedCameras,
+                            theme: theme,
+                            isMiniMap: true,
+                          ),
+                        ),
+                        Expanded(
+                          flex: 1,
+                          child: Center(child: _buildDigitalView(isOverLimit, theme)),
+                        ),
+                      ],
+                    )
+                  : Center(
+                      child: _buildActiveTabView(isOverLimit, theme),
+                    ),
             ),
 
-            // Real-Time Speed Telemetry Sparkline Graph (Shown on tabs 0, 1)
-            if (_recentSpeedPoints.isNotEmpty && (_activeTab == 0 || _activeTab == 1))
+            // Real-Time Speed Sparkline Graph (Shown on tabs 0, 1)
+            if (_recentSpeedPoints.isNotEmpty && (_activeTab == 0 || _activeTab == 1) && !_isSplitCockpit)
               Container(
                 margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 2.0),
                 padding: const EdgeInsets.all(8.0),
@@ -1119,8 +876,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                 ),
               ),
 
-            // Metrics Cards Grid (Shown on tabs 0, 1, 2)
-            if (_activeTab != 3)
+            // Metrics Cards Grid
+            if (_activeTab != 3 && _activeTab != 4 && _activeTab != 5)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 2.0),
                 child: GridView.count(
@@ -1143,7 +900,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
 
             const SizedBox(height: 4),
 
-            // Bottom Trip Control & Share Card Action
+            // Bottom Trip Controls
             if (_activeTab != 3)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 6.0),
@@ -1197,9 +954,208 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     );
   }
 
-  // -----------------------------------------------------------
-  // PERFORMANCE / DRAG RACING VIEW
-  // -----------------------------------------------------------
+  Widget _buildActiveTabView(bool isOverLimit, AppThemeOption theme) {
+    switch (_activeTab) {
+      case 0:
+        return _buildGaugeView(isOverLimit, theme);
+      case 1:
+        return _buildDigitalView(isOverLimit, theme);
+      case 2:
+        return _buildHudView(isOverLimit, theme);
+      case 3:
+        return _buildPerformanceDragView(theme);
+      case 4:
+        return InteractiveMapCanvas(
+          currentPosition: _lastPosition,
+          heading: _heading,
+          breadcrumbs: _breadcrumbs,
+          speedCameras: _speedCameras,
+          theme: theme,
+        );
+      case 5:
+        return DashcamOverlayWidget(
+          speed: _currentSpeed,
+          unit: _unit,
+          heading: _heading,
+          gForce: _currentGForce,
+          speedLimit: _speedLimit,
+          theme: theme,
+        );
+      default:
+        return _buildGaugeView(isOverLimit, theme);
+    }
+  }
+
+  Widget _buildTabItem(int index, String label, IconData icon, AppThemeOption theme) {
+    bool isSelected = _activeTab == index;
+    return InkWell(
+      onTap: () {
+        setState(() => _activeTab = index);
+        _syncWakelockState();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: isSelected ? theme.primary : Colors.transparent,
+              width: 2.5,
+            ),
+          ),
+          color: isSelected ? theme.primary.withOpacity(0.08) : Colors.transparent,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: isSelected ? theme.primary : Colors.white54),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? theme.primary : Colors.white54,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGaugeView(bool isOverLimit, AppThemeOption theme) {
+    return SizedBox(
+      width: 320,
+      height: 320,
+      child: CustomPaint(
+        painter: SpeedometerGaugePainter(
+          speed: _currentSpeed,
+          maxScale: _maxGaugeScale,
+          speedLimit: _speedLimit,
+          isOverLimit: isOverLimit,
+          unit: _unit,
+          primaryColor: theme.primary,
+          secondaryColor: theme.secondary,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDigitalView(bool isOverLimit, AppThemeOption theme) {
+    final activeColor = isOverLimit ? theme.secondary : theme.primary;
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          _currentSpeed.toStringAsFixed(0),
+          style: TextStyle(
+            fontSize: 98,
+            fontWeight: FontWeight.w900,
+            fontFamily: 'monospace',
+            color: activeColor,
+            shadows: [
+              Shadow(
+                color: activeColor.withOpacity(0.6),
+                blurRadius: 28,
+              ),
+            ],
+          ),
+        ),
+        Text(
+          _unit.toUpperCase(),
+          style: const TextStyle(fontSize: 22, color: Colors.white70, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+          decoration: BoxDecoration(
+            color: theme.cardBackground,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Text(
+            'LIMIT: ${_speedLimit.toStringAsFixed(0)} $_unit',
+            style: const TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHudView(bool isOverLimit, AppThemeOption theme) {
+    final activeColor = isOverLimit ? theme.secondary : theme.primary;
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()..scale(_isHudFlipped ? -1.0 : 1.0, 1.0),
+          child: Column(
+            children: [
+              Text(
+                _currentSpeed.toStringAsFixed(0),
+                style: TextStyle(
+                  fontSize: 116,
+                  fontWeight: FontWeight.w900,
+                  fontFamily: 'monospace',
+                  color: activeColor,
+                  shadows: [
+                    Shadow(color: activeColor.withOpacity(0.8), blurRadius: 36),
+                  ],
+                ),
+              ),
+              Text(
+                _unit.toUpperCase(),
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2,
+                  color: activeColor,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${_heading.toStringAsFixed(0)}° ${_getCardinalDirection(_heading)}',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white60,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: theme.cardBackground,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () => setState(() => _isHudFlipped = !_isHudFlipped),
+              icon: const Icon(Icons.flip, size: 16),
+              label: Text(_isHudFlipped ? 'Normal View' : 'Mirror Flip', style: const TextStyle(fontSize: 12)),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: theme.cardBackground,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () => setState(() => _isHudFullscreen = true),
+              icon: const Icon(Icons.fullscreen, size: 16),
+              label: const Text('Fullscreen HUD', style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildPerformanceDragView(AppThemeOption theme) {
     String statusTitle;
     Color statusColor;
@@ -1227,9 +1183,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          _buildDragTreeLights(theme),
+          DragTreeLights(stage: _treeLightStage),
           const SizedBox(height: 10),
-
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
             decoration: BoxDecoration(
@@ -1247,9 +1202,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
             ),
           ),
-
           const SizedBox(height: 14),
-
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -1284,9 +1237,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
             ],
           ),
-
           const SizedBox(height: 14),
-
           Row(
             children: [
               Expanded(
@@ -1309,9 +1260,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
             ],
           ),
-
           const SizedBox(height: 10),
-
           Row(
             children: [
               Expanded(
@@ -1335,9 +1284,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
           Row(
             children: [
               Expanded(
@@ -1379,64 +1326,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
           const SizedBox(height: 10),
         ],
       ),
-    );
-  }
-
-  Widget _buildDragTreeLights(AppThemeOption theme) {
-    bool isPreStage = _treeLightStage >= 1;
-    bool isAmber = _treeLightStage >= 2;
-    bool isGreen = _treeLightStage >= 3;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF050811),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildTreeLightDot('PRE', const Color(0xFFFF9900), isPreStage),
-          const SizedBox(width: 12),
-          _buildTreeLightDot('STAGED', const Color(0xFFFFCC00), isAmber),
-          const SizedBox(width: 12),
-          _buildTreeLightDot('GO', const Color(0xFF00FF66), isGreen),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTreeLightDot(String label, Color activeColor, bool isActive) {
-    return Column(
-      children: [
-        Container(
-          width: 22,
-          height: 22,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: isActive ? activeColor : activeColor.withOpacity(0.15),
-            boxShadow: isActive
-                ? [
-                    BoxShadow(
-                      color: activeColor.withOpacity(0.8),
-                      blurRadius: 10,
-                      spreadRadius: 2,
-                    ),
-                  ]
-                : [],
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
-            color: isActive ? Colors.white : Colors.white38,
-            fontSize: 9,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ],
     );
   }
 
@@ -1527,178 +1416,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     );
   }
 
-  Widget _buildTabItem(int index, String label, IconData icon, AppThemeOption theme) {
-    bool isSelected = _activeTab == index;
-    return Expanded(
-      child: InkWell(
-        onTap: () {
-          setState(() => _activeTab = index);
-          _syncWakelockState();
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: isSelected ? theme.primary : Colors.transparent,
-                width: 2.5,
-              ),
-            ),
-            color: isSelected ? theme.primary.withOpacity(0.08) : Colors.transparent,
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 15, color: isSelected ? theme.primary : Colors.white54),
-              const SizedBox(width: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  color: isSelected ? theme.primary : Colors.white54,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGaugeView(bool isOverLimit, AppThemeOption theme) {
-    return SizedBox(
-      width: 320,
-      height: 320,
-      child: CustomPaint(
-        painter: SpeedometerGaugePainter(
-          speed: _currentSpeed,
-          maxScale: _maxGaugeScale,
-          speedLimit: _speedLimit,
-          isOverLimit: isOverLimit,
-          unit: _unit,
-          primaryColor: theme.primary,
-          secondaryColor: theme.secondary,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDigitalView(bool isOverLimit, AppThemeOption theme) {
-    final activeColor = isOverLimit ? theme.secondary : theme.primary;
-
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(
-          _currentSpeed.toStringAsFixed(0),
-          style: TextStyle(
-            fontSize: 98,
-            fontWeight: FontWeight.w900,
-            fontFamily: 'monospace',
-            color: activeColor,
-            shadows: [
-              Shadow(
-                color: activeColor.withOpacity(0.6),
-                blurRadius: 28,
-              ),
-            ],
-          ),
-        ),
-        Text(
-          _unit.toUpperCase(),
-          style: const TextStyle(fontSize: 22, color: Colors.white70, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 12),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-          decoration: BoxDecoration(
-            color: theme.cardBackground,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white12),
-          ),
-          child: Text(
-            'LIMIT: ${_speedLimit.toStringAsFixed(0)} $_unit',
-            style: const TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildHudView(bool isOverLimit, AppThemeOption theme) {
-    final activeColor = isOverLimit ? theme.secondary : theme.primary;
-
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Transform(
-          alignment: Alignment.center,
-          transform: Matrix4.identity()..scale(_isHudFlipped ? -1.0 : 1.0, 1.0),
-          child: Column(
-            children: [
-              Text(
-                _currentSpeed.toStringAsFixed(0),
-                style: TextStyle(
-                  fontSize: 116,
-                  fontWeight: FontWeight.w900,
-                  fontFamily: 'monospace',
-                  color: activeColor,
-                  shadows: [
-                    Shadow(color: activeColor.withOpacity(0.8), blurRadius: 36),
-                  ],
-                ),
-              ),
-              Text(
-                _unit.toUpperCase(),
-                style: TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 2,
-                  color: activeColor,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${_heading.toStringAsFixed(0)}° ${_getCardinalDirection(_heading)}',
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white60,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 24),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: theme.cardBackground,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              ),
-              onPressed: () => setState(() => _isHudFlipped = !_isHudFlipped),
-              icon: const Icon(Icons.flip, size: 16),
-              label: Text(_isHudFlipped ? 'Normal View' : 'Mirror Flip', style: const TextStyle(fontSize: 12)),
-            ),
-            const SizedBox(width: 12),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: theme.cardBackground,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              ),
-              onPressed: () => setState(() => _isHudFullscreen = true),
-              icon: const Icon(Icons.fullscreen, size: 16),
-              label: const Text('Fullscreen HUD', style: TextStyle(fontSize: 12)),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
   Widget _buildMetricTile(String title, String value, IconData icon, AppThemeOption theme) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -1726,9 +1443,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     );
   }
 
-  // -----------------------------------------------------------
-  // RACING TELEMETRY SHARE CARD MODAL
-  // -----------------------------------------------------------
   void _showLiveShareCardModal() {
     final theme = widget.currentTheme;
 
@@ -1761,8 +1475,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ],
             ),
             const SizedBox(height: 12),
-
-            // Renderable Share Card
             RepaintBoundary(
               key: _shareCardKey,
               child: Container(
@@ -1807,8 +1519,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                       ],
                     ),
                     const Divider(color: Colors.white12, height: 20),
-
-                    // Big Stats Highlights
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
@@ -1818,10 +1528,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                         _buildShareCardStat('DURATION', _formatDuration(_elapsedSeconds), Colors.white),
                       ],
                     ),
-
                     const SizedBox(height: 14),
-
-                    // Additional Telemetry
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
@@ -1842,10 +1549,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 16),
-
-            // Share & Export Actions
             Row(
               children: [
                 Expanded(
@@ -1981,9 +1685,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     }
   }
 
-  // -----------------------------------------------------------
-  // TRIP HISTORY MODAL
-  // -----------------------------------------------------------
   void _showTripHistoryModal() async {
     final theme = widget.currentTheme;
     final trips = await TripStorageService.loadTrips();
@@ -2174,9 +1875,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     );
   }
 
-  // -----------------------------------------------------------
-  // SETTINGS DIALOG (UNITS, SOUNDS, FUEL & SPEED CAMERAS)
-  // -----------------------------------------------------------
   void _showSettingsDialog() {
     final theme = widget.currentTheme;
 
@@ -2197,7 +1895,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Unit Switcher
                 const Text('Speed Unit:', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 6),
                 SegmentedButton<String>(
@@ -2226,8 +1923,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                   },
                 ),
                 const SizedBox(height: 14),
-
-                // Speed Limit Slider
                 Text('Speed Limit Warning: ${_speedLimit.toInt()} $_unit',
                     style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                 Slider(
@@ -2242,8 +1937,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                   },
                 ),
                 const SizedBox(height: 6),
-
-                // Sound Theme Selector
                 const Text('Audio Alert Tone Style:', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 6),
                 DropdownButtonFormField<SoundToneStyle>(
@@ -2264,15 +1957,13 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                       setModalState(() => _soundStyle = val);
                       setState(() {
                         _soundStyle = val;
-                        _currentToneBytes = _generateSoundTone(val);
+                        _currentToneBytes = SoundGenerator.generateTone(val);
                       });
                       _audioPlayer.play(BytesSource(_currentToneBytes), mode: PlayerMode.lowLatency);
                     }
                   },
                 ),
                 const SizedBox(height: 10),
-
-                // Sound Alert & Vibration
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   activeColor: theme.primary,
@@ -2281,6 +1972,16 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                   onChanged: (val) {
                     setModalState(() => _audioAlertEnabled = val);
                     setState(() => _audioAlertEnabled = val);
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: theme.primary,
+                  title: const Text('Voice Assistant (ไทย / EN)', style: TextStyle(fontSize: 13, color: Colors.white)),
+                  value: _voiceAssistant.isEnabled,
+                  onChanged: (val) {
+                    setModalState(() => _voiceAssistant.isEnabled = val);
+                    setState(() => _voiceAssistant.isEnabled = val);
                   },
                 ),
                 SwitchListTile(
@@ -2303,10 +2004,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                     setState(() => _speedCameraAlertEnabled = val);
                   },
                 ),
-
                 const Divider(color: Colors.white12),
-
-                // Fuel Economy Settings
                 const Text('Fuel Cost Estimator:', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 Row(
@@ -2353,8 +2051,6 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                   ],
                 ),
                 const SizedBox(height: 10),
-
-                // Mark Camera Button
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: theme.primary,
@@ -2379,258 +2075,5 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
         ],
       ),
     );
-  }
-}
-
-// -------------------------------------------------------------
-// REAL-TIME SPEED TELEMETRY GRAPH PAINTER
-// -------------------------------------------------------------
-class SpeedHistoryGraphPainter extends CustomPainter {
-  final List<double> history;
-  final double maxScale;
-  final double speedLimit;
-  final Color lineColor;
-
-  SpeedHistoryGraphPainter({
-    required this.history,
-    required this.maxScale,
-    required this.speedLimit,
-    required this.lineColor,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (history.isEmpty) return;
-
-    final width = size.width;
-    final height = size.height;
-
-    final gridPaint = Paint()
-      ..color = Colors.white.withOpacity(0.05)
-      ..strokeWidth = 1;
-    canvas.drawLine(Offset(0, height * 0.5), Offset(width, height * 0.5), gridPaint);
-
-    double limitY = height - (speedLimit / maxScale).clamp(0.0, 1.0) * height;
-    final limitPaint = Paint()
-      ..color = Colors.redAccent.withOpacity(0.3)
-      ..strokeWidth = 1;
-    canvas.drawLine(Offset(0, limitY), Offset(width, limitY), limitPaint);
-
-    final path = Path();
-    final fillPath = Path();
-
-    double stepX = history.length > 1 ? width / (history.length - 1) : width;
-
-    for (int i = 0; i < history.length; i++) {
-      double x = i * stepX;
-      double normalized = (history[i] / maxScale).clamp(0.0, 1.0);
-      double y = height - (normalized * (height - 6)) - 3;
-
-      if (i == 0) {
-        path.moveTo(x, y);
-        fillPath.moveTo(x, height);
-        fillPath.lineTo(x, y);
-      } else {
-        path.lineTo(x, y);
-        fillPath.lineTo(x, y);
-      }
-    }
-
-    fillPath.lineTo((history.length - 1) * stepX, height);
-    fillPath.close();
-
-    final fillPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [lineColor.withOpacity(0.25), lineColor.withOpacity(0.0)],
-      ).createShader(Rect.fromLTWH(0, 0, width, height));
-    canvas.drawPath(fillPath, fillPaint);
-
-    final strokePaint = Paint()
-      ..color = lineColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.2
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    canvas.drawPath(path, strokePaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant SpeedHistoryGraphPainter oldDelegate) {
-    return true;
-  }
-}
-
-// -------------------------------------------------------------
-// SPEEDOMETER GAUGE PAINTER (ANALOG DIAL & NEON NEEDLE)
-// -------------------------------------------------------------
-class SpeedometerGaugePainter extends CustomPainter {
-  final double speed;
-  final double maxScale;
-  final double speedLimit;
-  final bool isOverLimit;
-  final String unit;
-  final Color primaryColor;
-  final Color secondaryColor;
-
-  SpeedometerGaugePainter({
-    required this.speed,
-    required this.maxScale,
-    required this.speedLimit,
-    required this.isOverLimit,
-    required this.unit,
-    required this.primaryColor,
-    required this.secondaryColor,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width * 0.42;
-
-    const startAngle = 135 * (pi / 180);
-    const sweepAngle = 270 * (pi / 180);
-
-    // 1. Dial Background
-    final bgPaint = Paint()
-      ..shader = const RadialGradient(
-        colors: [Color(0xFF0F172A), Color(0xFF050811)],
-      ).createShader(Rect.fromCircle(center: center, radius: radius * 1.1));
-    canvas.drawCircle(center, radius * 1.05, bgPaint);
-
-    // 2. Base Dial Track Arc
-    final baseTrackPaint = Paint()
-      ..color = const Color(0xFF1E293B)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 16
-      ..strokeCap = StrokeCap.round;
-    canvas.drawArc(Rect.fromCircle(center: center, radius: radius * 0.84), startAngle, sweepAngle, false, baseTrackPaint);
-
-    // 3. Warning Zone Arc (top 25%)
-    final warnPaint = Paint()
-      ..color = secondaryColor.withOpacity(0.85)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 16
-      ..strokeCap = StrokeCap.round;
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius * 0.84),
-      startAngle + sweepAngle * 0.75,
-      sweepAngle * 0.25,
-      false,
-      warnPaint,
-    );
-
-    // 4. Active Progress Arc
-    final clampedSpeed = speed.clamp(0.0, maxScale);
-    final activeSweep = sweepAngle * (clampedSpeed / maxScale);
-    final progressPaint = Paint()
-      ..color = isOverLimit ? secondaryColor : primaryColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 18
-      ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 4);
-
-    if (activeSweep > 0.01) {
-      canvas.drawArc(Rect.fromCircle(center: center, radius: radius * 0.84), startAngle, activeSweep, false, progressPaint);
-    }
-
-    // 5. Ticks & Numbers
-    final tickStep = (maxScale / 12).round();
-    int tickCount = (maxScale / tickStep).round();
-
-    for (int i = 0; i <= tickCount; i++) {
-      double angle = startAngle + (i / tickCount) * sweepAngle;
-      bool isMajor = i % 2 == 0;
-      double innerR = isMajor ? radius * 0.88 : radius * 0.92;
-      double outerR = radius * 0.96;
-
-      Offset p1 = center + Offset(cos(angle) * innerR, sin(angle) * innerR);
-      Offset p2 = center + Offset(cos(angle) * outerR, sin(angle) * outerR);
-
-      final tickPaint = Paint()
-        ..color = isMajor ? primaryColor.withOpacity(0.8) : const Color(0xFF334155)
-        ..strokeWidth = isMajor ? 3 : 1.5;
-      canvas.drawLine(p1, p2, tickPaint);
-
-      if (isMajor) {
-        double textR = radius * 0.70;
-        Offset textPos = center + Offset(cos(angle) * textR, sin(angle) * textR);
-        final tp = TextPainter(
-          text: TextSpan(
-            text: '${i * tickStep}',
-            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        tp.paint(canvas, textPos - Offset(tp.width / 2, tp.height / 2));
-      }
-    }
-
-    // 6. Pointer Needle
-    double needleAngle = startAngle + activeSweep;
-    final needlePaint = Paint()
-      ..color = isOverLimit ? secondaryColor : Colors.white
-      ..strokeWidth = 3.5
-      ..strokeCap = StrokeCap.round;
-
-    Offset needleTip = center + Offset(cos(needleAngle) * (radius * 0.88), sin(needleAngle) * (radius * 0.88));
-    canvas.drawLine(center, needleTip, needlePaint);
-
-    canvas.drawCircle(center, 9, Paint()..color = const Color(0xFF0F172A));
-    canvas.drawCircle(
-      center,
-      9,
-      Paint()
-        ..color = isOverLimit ? secondaryColor : primaryColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5,
-    );
-
-    // 7. Digital Speed in Center
-    final speedTextPainter = TextPainter(
-      text: TextSpan(
-        text: speed.toStringAsFixed(0),
-        style: TextStyle(
-          fontSize: 54,
-          fontWeight: FontWeight.w900,
-          fontFamily: 'monospace',
-          color: isOverLimit ? secondaryColor : primaryColor,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    speedTextPainter.paint(
-      canvas,
-      center - Offset(speedTextPainter.width / 2, speedTextPainter.height / 2 + 10),
-    );
-
-    // 8. Unit Label Under Digital Speed
-    final unitTextPainter = TextPainter(
-      text: TextSpan(
-        text: unit,
-        style: const TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.bold,
-          color: Colors.white54,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    unitTextPainter.paint(
-      canvas,
-      Offset(center.dx - unitTextPainter.width / 2, center.dy + speedTextPainter.height / 2 - 4),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant SpeedometerGaugePainter oldDelegate) {
-    return oldDelegate.speed != speed ||
-        oldDelegate.isOverLimit != isOverLimit ||
-        oldDelegate.maxScale != maxScale ||
-        oldDelegate.speedLimit != speedLimit ||
-        oldDelegate.unit != unit ||
-        oldDelegate.primaryColor != primaryColor ||
-        oldDelegate.secondaryColor != secondaryColor;
   }
 }
