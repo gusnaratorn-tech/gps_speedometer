@@ -51,6 +51,8 @@ class VoiceAssistantService {
           return '🏁 จับเวลาสำเร็จ! เวลาที่ทำได้ $extra';
         case VoicePromptType.tripFinished:
           return '✅ บันทึกสถิติการเดินทางเรียบร้อยแล้ว $extra';
+        case VoicePromptType.engineOverheat:
+          return '🔥 ระวัง! อุณหภูมิเครื่องยนต์ร้อนจัดเกิน 105°C $extra';
       }
     } else {
       switch (type) {
@@ -66,6 +68,8 @@ class VoiceAssistantService {
           return '🏁 Run completed! 0-100 time: $extra';
         case VoicePromptType.tripFinished:
           return '✅ Trip recorded successfully: $extra';
+        case VoicePromptType.engineOverheat:
+          return '🔥 Danger! Engine coolant overheating: $extra';
       }
     }
   }

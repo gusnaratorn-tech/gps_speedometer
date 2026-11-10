@@ -15,6 +15,7 @@ enum VoicePromptType {
   dragGo,
   dragSuccess,
   tripFinished,
+  engineOverheat,
 }
 
 const Map<SoundToneStyle, String> kSoundToneLabels = {
@@ -167,6 +168,10 @@ class SoundGenerator {
         case VoicePromptType.tripFinished:
           double f = progress < 0.5 ? 784.0 : 1046.5; // G5 -> C6
           sampleVal = sin(2 * pi * f * t);
+          break;
+        case VoicePromptType.engineOverheat:
+          double freq = (progress * 8).toInt() % 2 == 0 ? 880.0 : 440.0;
+          sampleVal = sin(2 * pi * freq * t) + 0.4 * sin(2 * pi * (freq * 1.5) * t);
           break;
       }
 

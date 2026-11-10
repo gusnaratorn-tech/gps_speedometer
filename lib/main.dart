@@ -12,13 +12,16 @@ import 'core/themes.dart';
 import 'core/sound_generator.dart';
 import 'models/trip_record.dart';
 import 'models/speed_camera.dart';
+import 'models/obd_data.dart';
 import 'services/trip_storage.dart';
 import 'services/voice_assistant.dart';
+import 'services/obd_service.dart';
 import 'ui/widgets/gauge_painter.dart';
 import 'ui/widgets/telemetry_graph.dart';
 import 'ui/widgets/tree_lights.dart';
 import 'ui/widgets/map_canvas.dart';
 import 'ui/widgets/dashcam_overlay.dart';
+import 'ui/widgets/tachometer_painter.dart';
 
 void main() {
   runApp(const SpeedometerApp());
@@ -156,6 +159,12 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
   DateTime _lastGTime = DateTime.now();
   int _treeLightStage = 0;
 
+  // OBD-II Bluetooth & Telemetry
+  late final ObdService _obdService;
+  ObdTelemetryData _obdData = const ObdTelemetryData();
+  StreamSubscription<ObdTelemetryData>? _obdSubscription;
+  DateTime? _lastOverheatAlertTime;
+
   // Audio & Voice Services
   late final AudioPlayer _audioPlayer;
   late final VoiceAssistantService _voiceAssistant;
@@ -168,6 +177,14 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     _currentToneBytes = SoundGenerator.generateTone(_soundStyle);
     _audioPlayer = AudioPlayer();
     _voiceAssistant = VoiceAssistantService();
+    _obdService = ObdService();
+    _obdSubscription = _obdService.telemetryStream.listen((data) {
+      if (!mounted) return;
+      setState(() {
+        _obdData = data;
+      });
+      _handleOverheatSafetyCheck(data);
+    });
     _checkLocationPermission();
   }
 
@@ -178,9 +195,22 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
     _tripTimer?.cancel();
     _dragWatchTimer?.cancel();
     _alertPulseTimer?.cancel();
+    _obdSubscription?.cancel();
+    _obdService.dispose();
     _audioPlayer.dispose();
     _voiceAssistant.dispose();
     super.dispose();
+  }
+
+  void _handleOverheatSafetyCheck(ObdTelemetryData data) {
+    if (data.isOverheating) {
+      final now = DateTime.now();
+      if (_lastOverheatAlertTime == null || now.difference(_lastOverheatAlertTime!).inSeconds >= 8) {
+        _lastOverheatAlertTime = now;
+        _voiceAssistant.speakPrompt(VoicePromptType.engineOverheat, extraInfo: '${data.coolantTemp.toInt()} °C');
+        HapticFeedback.heavyImpact();
+      }
+    }
   }
 
   Future<void> _setScreenAwake(bool awake) async {
@@ -699,10 +729,44 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                     _buildTabItem(3, 'Drag', Icons.sports_score_rounded, theme),
                     _buildTabItem(4, 'Map & Trail', Icons.map_outlined, theme),
                     _buildTabItem(5, 'Dashcam', Icons.videocam_outlined, theme),
+                    _buildTabItem(6, 'OBD Cockpit', Icons.directions_car_filled, theme),
                   ],
                 ),
               ),
             ),
+
+            // Engine Overheat Warning Banner (OBD-II Safety Alert)
+            if (_obdData.isOverheating)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFF1744),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFFF1744).withOpacity(0.6),
+                      blurRadius: 10,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      '🔥 ENGINE OVERHEAT! COOLANT AT ${_obdData.coolantTemp.toStringAsFixed(0)} °C (> 105 °C)',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12.5,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
             // Speed Limit Warning Alert Banner
             if (isOverLimit)
@@ -877,7 +941,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
 
             // Metrics Cards Grid
-            if (_activeTab != 3 && _activeTab != 4 && _activeTab != 5)
+            if (_activeTab != 3 && _activeTab != 4 && _activeTab != 5 && _activeTab != 6)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 2.0),
                 child: GridView.count(
@@ -981,6 +1045,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
           speedLimit: _speedLimit,
           theme: theme,
         );
+      case 6:
+        return _buildObdCockpitView(theme);
       default:
         return _buildGaugeView(isOverLimit, theme);
     }
@@ -1385,6 +1451,511 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildObdCockpitView(AppThemeOption theme) {
+    final bool isConnected = _obdService.status == ObdConnectionStatus.connected;
+    final bool isConnecting = _obdService.status == ObdConnectionStatus.connecting;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        children: [
+          // 1. Bluetooth Connection Status Bar
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: theme.cardBackground,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isConnected ? Colors.greenAccent.withOpacity(0.4) : Colors.white12,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
+                  color: isConnected ? Colors.greenAccent : (isConnecting ? Colors.orangeAccent : Colors.white54),
+                  size: 22,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isConnected
+                            ? (_obdService.connectedDeviceName ?? 'ELM327 OBD-II')
+                            : (isConnecting ? 'CONNECTING...' : 'OBD-II DISCONNECTED'),
+                        style: TextStyle(
+                          color: isConnected ? Colors.greenAccent : Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        isConnected
+                            ? (_obdService.connectedDeviceAddress ?? 'SPP 00001101-0000-1000-8000-00805F9B34FB')
+                            : 'Pair ELM327 in Android Settings then Connect',
+                        style: const TextStyle(color: Colors.white38, fontSize: 10),
+                      ),
+                    ],
+                  ),
+                ),
+                if (isConnected)
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFFF5252),
+                      side: const BorderSide(color: Color(0xFFFF5252)),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    ),
+                    onPressed: () async {
+                      await _obdService.disconnect();
+                      setState(() {});
+                    },
+                    child: const Text('DISCONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                  )
+                else
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.primary,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    ),
+                    onPressed: isConnecting ? null : _showBluetoothScannerSheet,
+                    icon: isConnecting
+                        ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                        : const Icon(Icons.bluetooth_searching, size: 14),
+                    label: Text(
+                      isConnecting ? 'LINKING...' : 'SCAN & LINK',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 2. Shift Light Bar
+          _buildShiftLightBar(_obdData.rpm),
+
+          const SizedBox(height: 10),
+
+          // 3. Tachometer Dial
+          SizedBox(
+            width: 250,
+            height: 250,
+            child: CustomPaint(
+              painter: TachometerGaugePainter(
+                rpm: _obdData.rpm,
+                maxRpm: 9000.0,
+                redlineRpm: 6500.0,
+                primaryColor: theme.primary,
+                secondaryColor: theme.secondary,
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 4. ECU Telemetry Gauges Grid
+          Row(
+            children: [
+              // Coolant Temp
+              Expanded(
+                child: _buildObdMetricCard(
+                  title: 'COOLANT TEMP',
+                  value: '${_obdData.coolantTemp.toStringAsFixed(0)} °C',
+                  subtitle: _obdData.isOverheating
+                      ? '⚠️ OVERHEAT (>105°C)'
+                      : (_obdData.coolantTemp > 95 ? 'HIGH (>95°C)' : 'OPTIMAL (80-95°C)'),
+                  icon: Icons.thermostat,
+                  valueColor: _obdData.isOverheating
+                      ? const Color(0xFFFF1744)
+                      : (_obdData.coolantTemp > 95 ? Colors.orangeAccent : Colors.greenAccent),
+                  progress: (_obdData.coolantTemp / 130.0).clamp(0.0, 1.0),
+                  progressColor: _obdData.isOverheating ? const Color(0xFFFF1744) : theme.primary,
+                  theme: theme,
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Boost Pressure
+              Expanded(
+                child: _buildObdMetricCard(
+                  title: 'BOOST / MAP',
+                  value: '${_obdData.boostBar.toStringAsFixed(2)} Bar',
+                  subtitle: _obdData.boostBar > 0 ? 'TURBO BOOST' : 'VACUUM',
+                  icon: Icons.compress,
+                  valueColor: theme.primary,
+                  progress: ((_obdData.boostBar + 1.0) / 3.0).clamp(0.0, 1.0),
+                  progressColor: theme.primary,
+                  theme: theme,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          Row(
+            children: [
+              // Throttle (TPS)
+              Expanded(
+                child: _buildObdMetricCard(
+                  title: 'THROTTLE (TPS)',
+                  value: '${_obdData.throttlePercent.toStringAsFixed(0)} %',
+                  subtitle: 'ACCELERATOR PEDAL',
+                  icon: Icons.electric_bolt,
+                  valueColor: Colors.white,
+                  progress: (_obdData.throttlePercent / 100.0).clamp(0.0, 1.0),
+                  progressColor: theme.primary,
+                  theme: theme,
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Fuel Level
+              Expanded(
+                child: _buildObdMetricCard(
+                  title: 'FUEL LEVEL',
+                  value: '${_obdData.fuelLevelPercent.toStringAsFixed(0)} %',
+                  subtitle: 'TANK LEVEL',
+                  icon: Icons.local_gas_station,
+                  valueColor: _obdData.fuelLevelPercent < 15 ? Colors.redAccent : Colors.white,
+                  progress: (_obdData.fuelLevelPercent / 100.0).clamp(0.0, 1.0),
+                  progressColor: _obdData.fuelLevelPercent < 15 ? Colors.redAccent : Colors.greenAccent,
+                  theme: theme,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // Speed Cross-Calibration: GPS vs ECU
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: theme.cardBackground,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white.withOpacity(0.06)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                Column(
+                  children: [
+                    const Text('GPS SPEED', style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${_currentSpeed.toStringAsFixed(0)} $_unit',
+                      style: TextStyle(color: theme.primary, fontSize: 16, fontWeight: FontWeight.w900),
+                    ),
+                  ],
+                ),
+                Container(height: 24, width: 1, color: Colors.white12),
+                Column(
+                  children: [
+                    const Text('ECU SPEED (OBD)', style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${_obdData.ecuSpeedKmh.toStringAsFixed(0)} km/h',
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildShiftLightBar(double rpm) {
+    final bool isRedline = rpm >= 6500;
+    // 8 LEDs: 3 green (2000, 3000, 4000), 2 yellow (5000, 5800), 3 red (6500, 7200, 8000)
+    final thresholds = [2000, 3000, 4000, 5000, 5800, 6500, 7200, 8000];
+    final colors = [
+      Colors.greenAccent,
+      Colors.greenAccent,
+      Colors.greenAccent,
+      Colors.amberAccent,
+      Colors.amberAccent,
+      const Color(0xFFFF2A6D),
+      const Color(0xFFFF2A6D),
+      const Color(0xFFFF2A6D),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF070B14),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isRedline ? const Color(0xFFFF2A6D) : Colors.white10,
+          width: isRedline ? 2 : 1,
+        ),
+        boxShadow: isRedline
+            ? [
+                BoxShadow(
+                  color: const Color(0xFFFF2A6D).withOpacity(0.5),
+                  blurRadius: 16,
+                  spreadRadius: 2,
+                )
+              ]
+            : null,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: List.generate(8, (i) {
+          final bool active = rpm >= thresholds[i];
+          final Color col = colors[i];
+          return Expanded(
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              height: 12,
+              decoration: BoxDecoration(
+                color: active ? col : col.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(3),
+                boxShadow: active
+                    ? [
+                        BoxShadow(
+                          color: col.withOpacity(0.8),
+                          blurRadius: 8,
+                          spreadRadius: 1,
+                        )
+                      ]
+                    : null,
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildObdMetricCard({
+    required String title,
+    required String value,
+    required String subtitle,
+    required IconData icon,
+    required Color valueColor,
+    required double progress,
+    required Color progressColor,
+    required AppThemeOption theme,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.cardBackground,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(title, style: const TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
+              Icon(icon, color: progressColor, size: 16),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: TextStyle(
+              color: valueColor,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+              fontFamily: 'monospace',
+            ),
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: progress,
+              backgroundColor: Colors.white10,
+              valueColor: AlwaysStoppedAnimation<Color>(progressColor),
+              minHeight: 5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(color: Colors.white38, fontSize: 9.5, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showBluetoothScannerSheet() async {
+    final theme = widget.currentTheme;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: theme.background,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return FutureBuilder<List<BluetoothDeviceInfo>>(
+              future: _obdService.getPairedDevices(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const SizedBox(
+                    height: 250,
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+
+                final devices = snapshot.data ?? [];
+
+                return Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.bluetooth_searching, color: theme.primary, size: 22),
+                              const SizedBox(width: 8),
+                              const Text(
+                                'OBD-II Bluetooth Adapters',
+                                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white54),
+                            onPressed: () => Navigator.pop(ctx),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Select your paired ELM327 / OBD-II device to establish RFCOMM telemetry link:',
+                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                      ),
+                      const SizedBox(height: 14),
+                      if (devices.isEmpty) ...[
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: theme.cardBackground,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: const Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.info_outline, color: Colors.amberAccent, size: 20),
+                                  SizedBox(width: 8),
+                                  Text('No Paired OBD-II Devices', style: TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold, fontSize: 13)),
+                                ],
+                              ),
+                              SizedBox(height: 8),
+                              Text(
+                                '1. Plug your ELM327 adapter into your car OBD-II port.\n2. Open Android Settings -> Bluetooth.\n3. Pair with "OBDII" (PIN: 1234 or 0000).\n4. Return here and tap Refresh.',
+                                style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.4),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Center(
+                          child: OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(foregroundColor: theme.primary),
+                            onPressed: () => setSheetState(() {}),
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('REFRESH PAIRED DEVICES'),
+                          ),
+                        ),
+                      ] else ...[
+                        Flexible(
+                          child: ListView.separated(
+                            shrinkWrap: true,
+                            itemCount: devices.length,
+                            separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                            itemBuilder: (context, index) {
+                              final dev = devices[index];
+                              final bool isThisConnected = _obdService.connectedDeviceAddress == dev.address &&
+                                  _obdService.status == ObdConnectionStatus.connected;
+
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  backgroundColor: isThisConnected ? Colors.greenAccent.withOpacity(0.2) : theme.cardBackground,
+                                  child: Icon(
+                                    Icons.directions_car,
+                                    color: isThisConnected ? Colors.greenAccent : theme.primary,
+                                    size: 20,
+                                  ),
+                                ),
+                                title: Text(
+                                  dev.name,
+                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                ),
+                                subtitle: Text(
+                                  dev.address,
+                                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                ),
+                                trailing: isThisConnected
+                                    ? Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.greenAccent.withOpacity(0.2),
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(color: Colors.greenAccent),
+                                        ),
+                                        child: const Text('LINKED', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 11)),
+                                      )
+                                    : ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: theme.primary,
+                                          foregroundColor: Colors.black,
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                        ),
+                                        onPressed: () async {
+                                          Navigator.pop(ctx);
+                                          setState(() {});
+                                          final ok = await _obdService.connect(dev.address, dev.name);
+                                          if (mounted) {
+                                            setState(() {});
+                                            ScaffoldMessenger.of(this.context).showSnackBar(
+                                              SnackBar(
+                                                backgroundColor: ok ? Colors.green[800] : Colors.red[800],
+                                                content: Text(ok ? 'Connected to ${dev.name}' : 'Failed to connect: ${_obdService.errorMessage ?? "Check device"}'),
+                                              ),
+                                            );
+                                          }
+                                        },
+                                        child: const Text('CONNECT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                      ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 
