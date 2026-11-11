@@ -139,9 +139,25 @@ class MainActivity: FlutterActivity() {
                     Thread {
                         try {
                             out.write("$pid\r".toByteArray())
-                            val buffer = ByteArray(256)
-                            val bytesRead = input.read(buffer)
-                            val response = if (bytesRead > 0) String(buffer, 0, bytesRead).trim() else ""
+                            out.flush()
+                            val sb = StringBuilder()
+                            val buffer = ByteArray(512)
+                            val startTime = System.currentTimeMillis()
+                            while (System.currentTimeMillis() - startTime < 1500) {
+                                if (input.available() > 0) {
+                                    val bytesRead = input.read(buffer)
+                                    if (bytesRead > 0) {
+                                        val chunk = String(buffer, 0, bytesRead)
+                                        sb.append(chunk)
+                                        if (chunk.contains(">")) {
+                                            break
+                                        }
+                                    }
+                                } else {
+                                    Thread.sleep(25)
+                                }
+                            }
+                            val response = sb.toString().replace(">", "").trim()
                             runOnUiThread { result.success(response) }
                         } catch (e: Exception) {
                             runOnUiThread { result.error("QUERY_ERROR", e.message, null) }

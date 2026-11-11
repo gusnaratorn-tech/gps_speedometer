@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 import '../models/obd_data.dart';
+import '../models/dtc_record.dart';
 
 enum ObdConnectionStatus {
   disconnected,
@@ -31,6 +32,10 @@ class ObdService {
   String? connectedDeviceName;
   String? connectedDeviceAddress;
   String? errorMessage;
+
+  bool isMilOn = false;
+  int confirmedDtcCount = 0;
+  List<DtcCode> lastScannedCodes = [];
 
   ObdTelemetryData _currentData = const ObdTelemetryData();
   ObdTelemetryData get currentData => _currentData;
@@ -209,6 +214,146 @@ class ObdService {
       }
     }
     return null;
+  }
+
+  // --- Diagnostic Trouble Codes (DTC) Operations ---
+
+  Future<bool> checkMilStatus() async {
+    try {
+      final res = await _channel.invokeMethod<String>('queryPid', {'pid': '0101'});
+      if (res != null) {
+        final clean = res.replaceAll(' ', '').toUpperCase();
+        final idx = clean.indexOf('4101');
+        if (idx != -1 && clean.length >= idx + 6) {
+          final byteA = int.tryParse(clean.substring(idx + 4, idx + 6), radix: 16);
+          if (byteA != null) {
+            isMilOn = (byteA & 0x80) != 0;
+            confirmedDtcCount = byteA & 0x7F;
+            return isMilOn;
+          }
+        }
+      }
+    } catch (_) {}
+    return isMilOn;
+  }
+
+  Future<List<DtcCode>> readDiagnosticTroubleCodes() async {
+    final bool wasPolling = _pollingTimer != null && _pollingTimer!.isActive;
+    _pollingTimer?.cancel();
+
+    final List<DtcCode> result = [];
+    final Set<String> codeSet = {};
+
+    try {
+      await checkMilStatus();
+
+      // Query Mode 03: Stored Confirmed DTCs
+      final storedRaw = await _channel.invokeMethod<String>('queryPid', {'pid': '03'});
+      final storedCodes = parseDtcResponse(storedRaw, isPending: false);
+      for (var c in storedCodes) {
+        if (!codeSet.contains(c.code)) {
+          codeSet.add(c.code);
+          result.add(c);
+        }
+      }
+
+      await Future.delayed(const Duration(milliseconds: 150));
+
+      // Query Mode 07: Pending DTCs
+      final pendingRaw = await _channel.invokeMethod<String>('queryPid', {'pid': '07'});
+      final pendingCodes = parseDtcResponse(pendingRaw, isPending: true);
+      for (var c in pendingCodes) {
+        if (!codeSet.contains(c.code)) {
+          codeSet.add(c.code);
+          result.add(c);
+        }
+      }
+
+      lastScannedCodes = List.from(result);
+    } catch (_) {
+    } finally {
+      if (wasPolling && status == ObdConnectionStatus.connected) {
+        _startPolling();
+      }
+    }
+
+    return result;
+  }
+
+  Future<bool> clearDiagnosticTroubleCodes() async {
+    final bool wasPolling = _pollingTimer != null && _pollingTimer!.isActive;
+    _pollingTimer?.cancel();
+
+    try {
+      // Send Mode 04 to ECU
+      final res = await _channel.invokeMethod<String>('queryPid', {'pid': '04'});
+      final clean = res?.replaceAll(' ', '').toUpperCase() ?? '';
+      final bool success = clean.contains('44') || clean.contains('OK') || clean.isEmpty;
+
+      if (success) {
+        lastScannedCodes.clear();
+        isMilOn = false;
+        confirmedDtcCount = 0;
+      }
+      return success;
+    } catch (_) {
+      return false;
+    } finally {
+      if (wasPolling && status == ObdConnectionStatus.connected) {
+        _startPolling();
+      }
+    }
+  }
+
+  static List<DtcCode> parseDtcResponse(String? raw, {bool isPending = false}) {
+    if (raw == null || raw.isEmpty) return [];
+    final upper = raw.toUpperCase().replaceAll(' ', '').replaceAll('\r', '').replaceAll('\n', '');
+    if (upper.contains('NODATA') || upper.contains('ERROR')) {
+      return [];
+    }
+
+    final List<DtcCode> codes = [];
+    final Set<String> seen = {};
+
+    final targetPrefix = isPending ? '47' : '43';
+    int searchIdx = 0;
+    while (searchIdx < upper.length) {
+      final idx = upper.indexOf(targetPrefix, searchIdx);
+      if (idx == -1) break;
+
+      int startOffset = idx + 2;
+      for (int i = startOffset; i + 4 <= upper.length; i += 4) {
+        final pair = upper.substring(i, i + 4);
+        if (pair == '0000') continue;
+        if (!RegExp(r'^[0-9A-F]{4}$').hasMatch(pair)) break;
+
+        final decoded = decodeDtcBytePair(pair);
+        if (decoded != null && !seen.contains(decoded)) {
+          seen.add(decoded);
+          codes.add(DtcCode(code: decoded, isPending: isPending));
+        }
+      }
+      searchIdx = idx + 2;
+    }
+    return codes;
+  }
+
+  static String? decodeDtcBytePair(String twoByteHex) {
+    if (twoByteHex.length != 4) return null;
+    final byteA = int.tryParse(twoByteHex.substring(0, 2), radix: 16);
+    if (byteA == null) return null;
+
+    final typeBits = (byteA >> 6) & 0x03;
+    final charPrefix = const ['P', 'C', 'B', 'U'][typeBits];
+    final secondDigit = (byteA >> 4) & 0x03;
+    final thirdDigit = (byteA & 0x0F).toRadixString(16).toUpperCase();
+    final fourthFifthDigits = twoByteHex.substring(2, 4).toUpperCase();
+
+    final code = '$charPrefix$secondDigit$thirdDigit$fourthFifthDigits';
+    if (code == 'P0000' || code == 'C0000' || code == 'B0000' || code == 'U0000') {
+      return null;
+    }
+    return code;
   }
 
   void dispose() {

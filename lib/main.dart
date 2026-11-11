@@ -13,6 +13,7 @@ import 'core/sound_generator.dart';
 import 'models/trip_record.dart';
 import 'models/speed_camera.dart';
 import 'models/obd_data.dart';
+import 'models/dtc_record.dart';
 import 'services/trip_storage.dart';
 import 'services/voice_assistant.dart';
 import 'services/obd_service.dart';
@@ -164,6 +165,14 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
   ObdTelemetryData _obdData = const ObdTelemetryData();
   StreamSubscription<ObdTelemetryData>? _obdSubscription;
   DateTime? _lastOverheatAlertTime;
+
+  // DTC Engine Diagnostics
+  bool _isScanningDtc = false;
+  bool _isClearingDtc = false;
+  List<DtcCode> _detectedDtcCodes = [];
+  bool _milActive = false;
+  String? _dtcStatusMessage;
+  final List<DtcDiagnosticReport> _savedDiagnosticReports = [];
 
   // Audio & Voice Services
   late final AudioPlayer _audioPlayer;
@@ -730,6 +739,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
                     _buildTabItem(4, 'Map & Trail', Icons.map_outlined, theme),
                     _buildTabItem(5, 'Dashcam', Icons.videocam_outlined, theme),
                     _buildTabItem(6, 'OBD Cockpit', Icons.directions_car_filled, theme),
+                    _buildTabItem(7, 'DTC Scanner', Icons.health_and_safety, theme),
                   ],
                 ),
               ),
@@ -941,7 +951,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               ),
 
             // Metrics Cards Grid
-            if (_activeTab != 3 && _activeTab != 4 && _activeTab != 5 && _activeTab != 6)
+            if (_activeTab != 3 && _activeTab != 4 && _activeTab != 5 && _activeTab != 6 && _activeTab != 7)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 2.0),
                 child: GridView.count(
@@ -965,7 +975,7 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
             const SizedBox(height: 4),
 
             // Bottom Trip Controls
-            if (_activeTab != 3)
+            if (_activeTab != 3 && _activeTab != 7)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 6.0),
                 child: Row(
@@ -1047,6 +1057,8 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
         );
       case 6:
         return _buildObdCockpitView(theme);
+      case 7:
+        return _buildDtcScannerView(theme);
       default:
         return _buildGaugeView(isOverLimit, theme);
     }
@@ -1954,6 +1966,620 @@ class _SpeedometerHomeScreenState extends State<SpeedometerHomeScreen> {
               },
             );
           },
+        );
+      },
+    );
+  }
+
+  Widget _buildDtcScannerView(AppThemeOption theme) {
+    final bool isConnected = _obdService.status == ObdConnectionStatus.connected;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 1. Connection Warning Banner if disconnected
+          if (!isConnected)
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.cardBackground,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.amber.withOpacity(0.4)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.bluetooth_disabled, color: Colors.amberAccent, size: 22),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'OBD-II Bluetooth Disconnected. Connect your ELM327 adapter to scan ECU trouble codes.',
+                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.primary,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    ),
+                    onPressed: _showBluetoothScannerSheet,
+                    child: const Text('LINK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+            ),
+
+          // 2. Check Engine Light (MIL) Status Card
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: _milActive ? const Color(0xFF451A03) : theme.cardBackground,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: _milActive ? const Color(0xFFF59E0B) : Colors.white12,
+                width: _milActive ? 2 : 1,
+              ),
+              boxShadow: _milActive
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFFF59E0B).withOpacity(0.3),
+                        blurRadius: 16,
+                        spreadRadius: 2,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: _milActive ? const Color(0xFFF59E0B) : Colors.white10,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _milActive ? Icons.warning_rounded : Icons.check_circle_outline,
+                    color: _milActive ? Colors.black : Colors.greenAccent,
+                    size: 26,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _milActive ? 'MALFUNCTION INDICATOR LAMP (MIL) ON' : 'CHECK ENGINE LIGHT OFF',
+                        style: TextStyle(
+                          color: _milActive ? const Color(0xFFF59E0B) : Colors.greenAccent,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _milActive
+                            ? 'ECU has detected active faults requiring attention.'
+                            : 'Normal operating status. No confirmed engine MIL flagged.',
+                        style: const TextStyle(color: Colors.white60, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 3. Scan & Clear Control Buttons Bar
+          Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: theme.primary,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: _isScanningDtc || _isClearingDtc ? null : _scanDtcCodes,
+                  icon: _isScanningDtc
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                      : const Icon(Icons.search, size: 18),
+                  label: Text(
+                    _isScanningDtc ? 'INTERROGATING ECU...' : 'SCAN ENGINE CODES',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFFF5252),
+                    side: BorderSide(
+                      color: _detectedDtcCodes.isNotEmpty ? const Color(0xFFFF5252) : Colors.white24,
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: (_detectedDtcCodes.isEmpty || _isScanningDtc || _isClearingDtc)
+                      ? null
+                      : () => _confirmAndClearDtcCodes(theme),
+                  icon: const Icon(Icons.delete_forever, size: 18),
+                  label: const Text(
+                    'CLEAR DTC',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          if (_dtcStatusMessage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _dtcStatusMessage!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54, fontSize: 11, fontStyle: FontStyle.italic),
+            ),
+          ],
+
+          const SizedBox(height: 14),
+
+          // 4. Detected DTC Code Cards List
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'DETECTED TROUBLE CODES (${_detectedDtcCodes.length})',
+                style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.1),
+              ),
+              if (_savedDiagnosticReports.isNotEmpty)
+                GestureDetector(
+                  onTap: _showDiagnosticHistoryModal,
+                  child: Row(
+                    children: [
+                      Icon(Icons.history, color: theme.primary, size: 14),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Saved Reports (${_savedDiagnosticReports.length})',
+                        style: TextStyle(color: theme.primary, fontSize: 11, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          if (_detectedDtcCodes.isEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
+              decoration: BoxDecoration(
+                color: theme.cardBackground,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.verified, color: theme.primary.withOpacity(0.5), size: 48),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'No Trouble Codes Stored',
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Tap "SCAN ENGINE CODES" to request Mode 03 & Mode 07 diagnostics from your vehicle ECU.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 11.5),
+                  ),
+                ],
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _detectedDtcCodes.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final dtc = _detectedDtcCodes[index];
+                return _buildDtcCodeCard(dtc, theme);
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDtcCodeCard(DtcCode dtc, AppThemeOption theme) {
+    Color systemColor = const Color(0xFFF97316);
+    if (dtc.code.startsWith('C')) systemColor = const Color(0xFF3B82F6);
+    if (dtc.code.startsWith('B')) systemColor = const Color(0xFFA855F7);
+    if (dtc.code.startsWith('U')) systemColor = const Color(0xFF10B981);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.cardBackground,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: systemColor.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: systemColor.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: systemColor),
+                    ),
+                    child: Text(
+                      dtc.code,
+                      style: TextStyle(
+                        color: systemColor,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 16,
+                        fontFamily: 'monospace',
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: dtc.isPending ? Colors.amber.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      dtc.isPending ? 'PENDING' : 'CONFIRMED',
+                      style: TextStyle(
+                        color: dtc.isPending ? Colors.amberAccent : const Color(0xFFFF5252),
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 16, color: Colors.white54),
+                tooltip: 'Copy Code & Description',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: '${dtc.code}: ${dtc.description}'));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Copied ${dtc.code} to clipboard')),
+                  );
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            dtc.system,
+            style: TextStyle(color: systemColor.withOpacity(0.9), fontSize: 10, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            dtc.description,
+            style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.3),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: theme.primary,
+              side: BorderSide(color: theme.primary.withOpacity(0.5)),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              visualDensity: VisualDensity.compact,
+            ),
+            onPressed: () {
+              _showDtcWebSearchDialog(dtc, theme);
+            },
+            icon: const Icon(Icons.open_in_new, size: 14),
+            label: const Text('SEARCH ONLINE REPAIR GUIDES', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDtcWebSearchDialog(DtcCode dtc, AppThemeOption theme) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: theme.cardBackground,
+        title: Row(
+          children: [
+            Icon(Icons.search, color: theme.primary, size: 20),
+            const SizedBox(width: 8),
+            Text('Online Lookup: ${dtc.code}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(dtc.description, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            const SizedBox(height: 14),
+            const Text('Google Search Query URL:', style: TextStyle(color: Colors.white38, fontSize: 10)),
+            const SizedBox(height: 4),
+            SelectableText(
+              dtc.googleSearchUrl,
+              style: TextStyle(color: theme.primary, fontSize: 11, decoration: TextDecoration.underline),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('COPY SEARCH URL'),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: dtc.googleSearchUrl));
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Search URL copied to clipboard')),
+              );
+            },
+          ),
+          TextButton(
+            child: const Text('CLOSE'),
+            onPressed: () => Navigator.pop(ctx),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _scanDtcCodes() async {
+    if (_obdService.status != ObdConnectionStatus.connected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please connect OBD-II Bluetooth device first.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isScanningDtc = true;
+      _dtcStatusMessage = 'Interrogating ECU Mode 01, 03, 07...';
+    });
+    HapticFeedback.mediumImpact();
+
+    try {
+      final codes = await _obdService.readDiagnosticTroubleCodes();
+      if (!mounted) return;
+      setState(() {
+        _detectedDtcCodes = codes;
+        _milActive = _obdService.isMilOn;
+        _isScanningDtc = false;
+        _dtcStatusMessage = codes.isEmpty
+            ? 'Scan complete: No Diagnostic Trouble Codes found.'
+            : 'Scan complete: Found ${codes.length} trouble code(s).';
+      });
+      HapticFeedback.lightImpact();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isScanningDtc = false;
+        _dtcStatusMessage = 'Scan failed: $e';
+      });
+    }
+  }
+
+  Future<void> _confirmAndClearDtcCodes(AppThemeOption theme) async {
+    if (_obdService.status != ObdConnectionStatus.connected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please connect OBD-II device first.')),
+      );
+      return;
+    }
+
+    // 1. Auto-Archive Diagnostic Health Report before Clear (User-Requested Requirement)
+    final now = DateTime.now();
+    final dateStr =
+        '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final report = DtcDiagnosticReport(
+      id: now.millisecondsSinceEpoch.toString(),
+      timestampFormatted: dateStr,
+      milActive: _milActive,
+      codes: List.from(_detectedDtcCodes),
+    );
+    setState(() {
+      _savedDiagnosticReports.insert(0, report);
+    });
+
+    // 2. Show safety confirmation dialog with checklist
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: theme.cardBackground,
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Color(0xFFFF5252), size: 22),
+            SizedBox(width: 8),
+            Text('Clear Engine Codes', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.greenAccent.withOpacity(0.3)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.archive, color: Colors.greenAccent, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Report Auto-Archived: ${_detectedDtcCodes.length} codes saved to History before clearing.',
+                      style: const TextStyle(color: Colors.greenAccent, fontSize: 11.5, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '⚠️ Critical Safety Checklist:',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '• Ignition Switch ON (Key ON / ACC)\n• Engine OFF (เครื่องยนต์ต้องดับอยู่)\n• Do NOT unplug OBD-II adapter during command',
+              style: TextStyle(color: Colors.white70, fontSize: 11.5, height: 1.4),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Mode 04 will turn off Check Engine Light (MIL) and reset ECU readiness monitors.',
+              style: TextStyle(color: Colors.white38, fontSize: 10.5),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+            onPressed: () => Navigator.pop(ctx),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFFF5252),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              setState(() {
+                _isClearingDtc = true;
+                _dtcStatusMessage = 'Sending Mode 04 Clear DTC to ECU...';
+              });
+              final success = await _obdService.clearDiagnosticTroubleCodes();
+              if (!mounted) return;
+              setState(() {
+                _isClearingDtc = false;
+                if (success) {
+                  _detectedDtcCodes.clear();
+                  _milActive = false;
+                  _dtcStatusMessage = '✅ Mode 04 Succeeded: DTCs cleared & MIL reset.';
+                } else {
+                  _dtcStatusMessage = '❌ Clear command failed: Check engine switch state.';
+                }
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  backgroundColor: success ? Colors.green[800] : Colors.red[800],
+                  content: Text(success ? 'Check Engine DTCs cleared successfully!' : 'Failed to clear DTCs from ECU.'),
+                ),
+              );
+            },
+            child: const Text('CONFIRM CLEAR', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDiagnosticHistoryModal() {
+    final theme = widget.currentTheme;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: theme.background,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.history, color: theme.primary, size: 22),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Archived Diagnostic Reports',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                    ],
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white54),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (_savedDiagnosticReports.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24.0),
+                  child: Center(
+                    child: Text('No archived diagnostic reports yet.', style: TextStyle(color: Colors.white38)),
+                  ),
+                )
+              else
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: _savedDiagnosticReports.length,
+                    separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                    itemBuilder: (context, idx) {
+                      final r = _savedDiagnosticReports[idx];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: theme.cardBackground,
+                          child: Icon(Icons.description, color: theme.primary, size: 20),
+                        ),
+                        title: Text(
+                          'Scan: ${r.timestampFormatted}',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                        subtitle: Text(
+                          '${r.codes.length} DTCs found • MIL: ${r.milActive ? "ON" : "OFF"}\nCodes: ${r.codes.map((c) => c.code).join(", ")}',
+                          style: const TextStyle(color: Colors.white60, fontSize: 11),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.copy, size: 16, color: Colors.white54),
+                          tooltip: 'Copy Report',
+                          onPressed: () {
+                            final text = 'Diagnostic Report (${r.timestampFormatted})\nCodes: ${r.codes.map((c) => "${c.code} - ${c.description}").join("\n")}';
+                            Clipboard.setData(ClipboardData(text: text));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Report copied to clipboard')),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
         );
       },
     );

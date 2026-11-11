@@ -4,6 +4,8 @@ import 'package:gps_speedometer/core/sound_generator.dart';
 import 'package:gps_speedometer/models/trip_record.dart';
 import 'package:gps_speedometer/models/speed_camera.dart';
 import 'package:gps_speedometer/models/obd_data.dart';
+import 'package:gps_speedometer/models/dtc_record.dart';
+import 'package:gps_speedometer/services/obd_service.dart';
 import 'package:gps_speedometer/services/voice_assistant.dart';
 
 void main() {
@@ -18,6 +20,7 @@ void main() {
     expect(find.text('Map & Trail'), findsOneWidget);
     expect(find.text('Dashcam'), findsOneWidget);
     expect(find.text('OBD Cockpit'), findsOneWidget);
+    expect(find.text('DTC Scanner'), findsOneWidget);
   });
 
   test('ObdTelemetryData calculations and overheating flags', () {
@@ -102,5 +105,59 @@ void main() {
     final enOverheat = assistant.getPromptText(VoicePromptType.engineOverheat, extra: '108°C');
     expect(enOverheat.contains('Danger'), isTrue);
     assistant.dispose();
+  });
+
+  test('SAE J1979 DTC hex decoder decodes standard codes properly', () {
+    expect(ObdService.decodeDtcBytePair('0102'), 'P0102');
+    expect(ObdService.decodeDtcBytePair('0300'), 'P0300');
+    expect(ObdService.decodeDtcBytePair('0420'), 'P0420');
+    expect(ObdService.decodeDtcBytePair('4120'), 'C0120');
+    expect(ObdService.decodeDtcBytePair('8100'), 'B0100');
+    expect(ObdService.decodeDtcBytePair('C120'), 'U0120');
+    expect(ObdService.decodeDtcBytePair('0000'), isNull);
+  });
+
+  test('ObdService.parseDtcResponse extracts Mode 03 & 07 DTC codes', () {
+    // Mode 03 response with P0102 and P0300
+    const rawMode03 = '43 01 02 03 00 00 00';
+    final codes = ObdService.parseDtcResponse(rawMode03, isPending: false);
+    expect(codes.length, 2);
+    expect(codes[0].code, 'P0102');
+    expect(codes[0].isPending, isFalse);
+    expect(codes[1].code, 'P0300');
+
+    // Mode 07 pending response with U0120
+    const rawMode07 = '47 C1 20 00 00';
+    final pendingCodes = ObdService.parseDtcResponse(rawMode07, isPending: true);
+    expect(pendingCodes.length, 1);
+    expect(pendingCodes[0].code, 'U0120');
+    expect(pendingCodes[0].isPending, isTrue);
+
+    // Empty or no data
+    expect(ObdService.parseDtcResponse('NO DATA'), isEmpty);
+    expect(ObdService.parseDtcResponse('43 00 00'), isEmpty);
+  });
+
+  test('DtcDiagnosticReport serialization and auto-archive test', () {
+    const report = DtcDiagnosticReport(
+      id: 'rep_12345',
+      timestampFormatted: '10/11/2026 16:00',
+      milActive: true,
+      codes: [
+        DtcCode(code: 'P0300', isPending: false),
+        DtcCode(code: 'P0171', isPending: true),
+      ],
+    );
+
+    final json = report.toJson();
+    expect(json['id'], 'rep_12345');
+    expect(json['milActive'], isTrue);
+    expect((json['codes'] as List).length, 2);
+
+    final restored = DtcDiagnosticReport.fromJson(json);
+    expect(restored.id, 'rep_12345');
+    expect(restored.codes[0].code, 'P0300');
+    expect(restored.codes[1].isPending, isTrue);
+    expect(restored.codes[0].googleSearchUrl.contains('P0300'), isTrue);
   });
 }
